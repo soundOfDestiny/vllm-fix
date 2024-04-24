@@ -7,7 +7,7 @@ from typing import List, Set
 from packaging.version import parse, Version
 import setuptools
 import torch
-from torch.utils.cpp_extension import BuildExtension, CUDAExtension, CUDA_HOME
+from torch.utils.cpp_extension import BuildExtension, CppExtension, CUDAExtension, CUDA_HOME
 
 ROOT_DIR = os.path.dirname(__file__)
 
@@ -71,6 +71,20 @@ if nvcc_cuda_version >= Version("11.2"):
     NVCC_FLAGS += ["--threads", str(num_threads)]
 
 ext_modules = []
+
+conda_prefix = os.environ['CONDA_PREFIX']
+engine_extension = CppExtension(
+    name="vllm._engine",
+    sources=[
+        "csrc/engine/pybind.cpp",
+    ],
+    extra_compile_args={
+        "cxx": CXX_FLAGS + ["-Wno-sign-compare", "-Wno-attributes"],
+    },
+    include_dirs=[conda_prefix + '/include'],
+    library_dirs=[conda_prefix + '/lib'],
+)
+ext_modules.append(engine_extension)
 
 # Cache operations.
 cache_extension = CUDAExtension(
