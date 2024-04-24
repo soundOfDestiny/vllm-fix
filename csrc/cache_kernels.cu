@@ -140,6 +140,71 @@ void copy_blocks(
 namespace vllm {
 
 template<typename scalar_t>
+__global__ void cache_kernel(
+  const scalar_t* __restrict__ key,           // [num_tokens, num_heads, head_size]
+  const scalar_t* __restrict__ value,         // [num_tokens, num_heads, head_size]
+  scalar_t* __restrict__ key_cache,           // [num_blocks, block_size, num_heads, head_size]
+  scalar_t* __restrict__ value_cache,         // [num_blocks, block_size, num_heads, head_size]
+  const int* __restrict__ slot_mapping,   // [num_tokens]
+  const int stride,
+  const int num_heads,
+  const int head_size) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  if (slot_idx < 0) {
+    // Padding token that should be ignored.
+    return;
+  }
+  const int n = num_heads * head_size;
+  for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    const int64_t src_idx = token_idx * stride + i;
+    const int64_t tgt_idx = slot_idx * n + i;
+    key_cache[tgt_idx] = key[src_idx];
+    if (value) {
+      value_cache[tgt_idx] = value[src_idx];
+    }
+  }
+}
+
+} // namespace vllm
+
+void cache(
+  torch::Tensor& key,                         // [num_tokens, num_heads, head_size]
+  c10::optional<torch::Tensor>& value,        // [num_tokens, num_heads, head_size]
+  torch::Tensor& key_cache,                   // [num_blocks, block_size, num_heads, head_size]
+  c10::optional<torch::Tensor>& value_cache,  // [num_blocks, block_size, num_heads, head_size]
+  torch::Tensor& slot_mapping)                // [num_tokens]
+{
+  int num_tokens = key.size(0);
+  int num_heads = key.size(1);
+  int head_size = key.size(2);
+
+  int stride = key.stride(0);
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min(num_heads * head_size, 512));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  AT_DISPATCH_FLOATING_TYPES_AND2(
+    at::ScalarType::Half,
+    at::ScalarType::BFloat16,
+    key.scalar_type(),
+    "cache_kernel",
+    [&] {
+      vllm::cache_kernel<scalar_t><<<grid, block, 0, stream>>>(
+        key.data_ptr<scalar_t>(),
+        value ? value.value().data_ptr<scalar_t>() : nullptr,
+        key_cache.data_ptr<scalar_t>(),
+        value_cache ? value_cache.value().data_ptr<scalar_t>() : nullptr,
+        slot_mapping.data_ptr<int>(),
+        stride,
+        num_heads,
+        head_size);
+    });
+}
+
+namespace vllm {
+
+template<typename scalar_t>
 __global__ void reshape_and_cache_kernel(
   const scalar_t* __restrict__ key,     // [num_tokens, num_heads, head_size]
   const scalar_t* __restrict__ value,   // [num_tokens, num_heads, head_size]
@@ -152,27 +217,27 @@ __global__ void reshape_and_cache_kernel(
   const int head_size,
   const int block_size,
   const int x) {
-  const int token_idx = blockIdx.x;
-  const int slot_idx = slot_mapping[token_idx];
-  const int block_idx = slot_idx / block_size;
-  const int block_offset = slot_idx % block_size;
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
 
   const int n = num_heads * head_size;
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
-    const int src_key_idx = token_idx * key_stride + i;
-    const int src_value_idx = token_idx * value_stride + i;
+    const int64_t src_key_idx = token_idx * key_stride + i;
+    const int64_t src_value_idx = token_idx * value_stride + i;
 
     const int head_idx = i / head_size;
     const int head_offset = i % head_size;
     const int x_idx = head_offset / x;
     const int x_offset = head_offset % x;
 
-    const int tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
+    const int64_t tgt_key_idx = block_idx * num_heads * (head_size / x) * block_size * x
                             + head_idx * (head_size / x) * block_size * x
                             + x_idx * block_size * x
                             + block_offset * x
                             + x_offset;
-    const int tgt_value_idx = block_idx * num_heads * head_size * block_size
+    const int64_t tgt_value_idx = block_idx * num_heads * head_size * block_size
                               + head_idx * head_size * block_size
                               + head_offset * block_size
                               + block_offset;

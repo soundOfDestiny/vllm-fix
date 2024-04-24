@@ -13,6 +13,13 @@ void copy_blocks(
   std::vector<torch::Tensor>& value_caches,
   const std::map<int64_t, std::vector<int64_t>>& block_mapping);
 
+void cache(
+  torch::Tensor& key,
+  c10::optional<torch::Tensor>& value,
+  torch::Tensor& key_cache,
+  c10::optional<torch::Tensor>& value_cache,
+  torch::Tensor& slot_mapping);
+
 void reshape_and_cache(
   torch::Tensor& key,
   torch::Tensor& value,
@@ -36,6 +43,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     "copy_blocks",
     &copy_blocks,
     "Copy the cache blocks from src to dst");
+  m.def(
+    "cache",
+    &cache,
+    "Cache the key and value tensors");
   m.def(
     "reshape_and_cache",
     &reshape_and_cache,
